@@ -1,4 +1,6 @@
 import time
+import subprocess
+import shutil
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -6,25 +8,35 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+def get_driver_path():
+    """Dynamically finds the chromedriver path."""
+    path = shutil.which("chromedriver") or shutil.which("chromium-chromedriver")
+    if not path:
+        # Check common fallback path
+        import os
+        fallback = "/usr/lib/chromium-browser/chromedriver"
+        if os.path.exists(fallback):
+            return fallback
+    return path
+
 def setup_driver():
-    """Heavy-duty configuration for Cloud/Linux environments."""
     chrome_options = Options()
-    
-    # Critical flags for Cloud Environments
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--remote-debugging-port=9222")
     
-    # Identifying as a real user
+    # Real user-agent to prevent being blocked by Google's anti-bot
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Path settings for standard Linux installations
-    chrome_options.binary_location = "/usr/bin/chromium-browser"
+    # Find the driver path
+    driver_path = get_driver_path()
+    if not driver_path:
+        print("[ERROR] Could not find chromedriver. Ensure chromium-chromedriver is installed.")
+        return None
     
-    # Point directly to the driver installed via apt-get
-    service = Service("/usr/lib/chromium-browser/chromedriver")
+    print(f"Using driver found at: {driver_path}")
+    service = Service(driver_path)
     
     try:
         driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -35,30 +47,29 @@ def setup_driver():
 
 def scan_issue(driver, issue_id):
     url = f"https://issuetracker.google.com/issues/{issue_id}"
-    print(f"Checking ID: {issue_id}...", end="\r")
+    print(f"Scanning Issue {issue_id}...", end="\r")
     
     try:
         driver.get(url)
         
-        # Wait for content to render
+        # Wait for the issue title to load
         wait = WebDriverWait(driver, 20)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "issue-view")))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "issue-view, .issue-title")))
         
-        # Click "show quoted text" to find keywords hidden in thread replies
-        quoted_buttons = driver.find_elements(By.CSS_SELECTOR, ".show-quoted-text-link")
-        for btn in quoted_buttons:
-            try:
+        # Expand "show quoted text" (the dots) to see hidden content
+        # Buganizer often uses dots (...) for this
+        try:
+            expand_buttons = driver.find_elements(By.CSS_SELECTOR, ".show-quoted-text-link, [aria-label*='quoted text']")
+            for btn in expand_buttons:
                 driver.execute_script("arguments[0].click();", btn)
-            except:
-                continue 
+            time.sleep(1) # wait for expansion
+        except:
+            pass
+
+        # Search the entire page source for the keyword
+        full_content = driver.page_source.lower()
         
-        time.sleep(2) # Allow expansion
-        
-        # Check both the visible text and the raw HTML for the keyword
-        page_source = driver.page_source.lower()
-        visible_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-        
-        if "buganizer" in visible_text or "buganizer" in page_source:
+        if "buganizer" in full_content:
             title = driver.title.replace(" - Issue Tracker", "").strip()
             return {"id": issue_id, "title": title, "match": True}
         
@@ -68,35 +79,25 @@ def scan_issue(driver, issue_id):
         return {"id": issue_id, "error": str(e)}
 
 def main():
-    print("--- Buganizer Scanner (Cloud Optimized) ---")
     ids_input = input("Enter Report IDs (comma-separated): ")
     ids = [i.strip() for i in ids_input.split(",") if i.strip()]
     
     driver = setup_driver()
-    if not driver:
-        return
+    if not driver: return
 
-    results = []
     try:
+        print(f"\n{'ID':<15} | {'Match?':<8} | {'Title'}")
+        print("-" * 60)
         for eid in ids:
-            result = scan_issue(driver, eid)
-            results.append(result)
-            
-        print("\n" + "="*70)
-        print(f"{'Report ID':<15} | {'Found?':<8} | {'Title'}")
-        print("-" * 70)
-        
-        for res in results:
-            if "error" in res:
-                print(f"{res['id']:<15} | ERROR    | {res['error'][:40]}...")
-            elif res["match"]:
+            res = scan_issue(driver, eid)
+            if res.get("match"):
                 print(f"{res['id']:<15} | YES      | {res['title']}")
+            elif "error" in res:
+                print(f"{res['id']:<15} | ERROR    | {res['error'][:30]}")
             else:
-                print(f"{res['id']:<15} | NO       | (Keyword not found)")
-                
+                print(f"{res['id']:<15} | NO       | ---")
     finally:
-        if driver:
-            driver.quit()
+        driver.quit()
 
 if __name__ == "__main__":
     main()
